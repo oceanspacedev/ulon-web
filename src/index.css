@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+/* Ini Kopi Ulon — soft daylight at the counter.
+   A white page with a quiet warm-grey ramp for bands, cards and hairlines; dark coffee text; one caramel accent
+   for the selection, the focus ring and one key figure. The primary button is filled with the text colour.
+   Token names are kept from earlier versions, by role:
+   cream = page, roast = a slightly deeper band, oat = card, raised = active row or input, latte = hairline,
+   choco/espresso/paper = primary text (paper also fills the primary button), mocha = secondary text,
+   muted = meta, caramel/honey = accent, ink = text on a paper fill and on dark photos. */
+@theme {
+  --color-cream: #ffffff;
+  --color-roast: #f5f1eb;
+  --color-oat: #f7f4ef;
+  --color-blush: #f7f4ef;
+  --color-raised: #eee8df;
+  --color-latte: #e3dbcf;
+  --color-choco: #2b2520;
+  --color-espresso: #2b2520;
+  --color-paper: #2b2520;
+  --color-mocha: #5c5349;
+  --color-muted: #72685c;
+  --color-caramel: #985a2c;
+  --color-caramel-dark: #7f4a22;
+  --color-honey: #985a2c;
+  --color-ink: #f5f0e8;
+
+  --font-sans: "Instrument Sans Variable", system-ui, sans-serif;
+  --font-display: "Instrument Serif", Georgia, serif;
+  /* numbers (shop numbers, counts) use the text face with tabular figures; no code-style monospace */
+  --font-mono: "Instrument Sans Variable", system-ui, sans-serif;
+
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  html { color-scheme: light; }
+  body {
+    @apply bg-cream font-sans text-[15px] leading-[1.6] text-espresso antialiased;
+  }
+  /* the display serif is for large headlines only */
+  h1, h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    color: var(--color-choco);
+    text-wrap: balance;
+  }
+  h3 { font-weight: 500; color: var(--color-choco); }
+  ::selection { background: var(--color-caramel); color: #fff; }
+  :focus-visible { outline: 2px solid var(--color-caramel); outline-offset: 2px; border-radius: 4px; }
+}
+
+/* entrances on load: content fades and rises; the hero photo settles from a slow zoom */
+@keyframes rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+@keyframes settle { from { transform: scale(1.18); } to { transform: scale(1); } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+.enter { animation: rise 700ms var(--ease-soft) both; }
+.enter-2 { animation: rise 700ms var(--ease-soft) 120ms both; }
+.enter-3 { animation: rise 700ms var(--ease-soft) 240ms both; }
+.enter-late { animation: rise 800ms var(--ease-soft) 600ms both; }
+.settle { animation: settle 2400ms var(--ease-soft) both; }
+
+/* scroll reveals (motion.tsx): content fades and rises; photos open like a curtain while the image settles */
+.reveal { opacity: 0; transform: translateY(40px); transition: opacity 900ms var(--ease-soft), transform 900ms var(--ease-soft); }
+.reveal.is-in { opacity: 1; transform: none; }
+.reveal-clip { clip-path: inset(100% 0 0 0 round 16px); transition: clip-path 1100ms var(--ease-soft); }
+.reveal-clip.is-in { clip-path: inset(0 0 0 0 round 16px); }
+/* the photo gets its own layer so the settle is done by the GPU, not repainted every frame */
+.reveal-clip img { transform: scale(1.15); transition: transform 1600ms var(--ease-soft); transition-delay: inherit; will-change: transform; backface-visibility: hidden; }
+.reveal-clip.is-in img { transform: scale(1); }
+
+/* headlines (Title): each word rises from behind its own mask, one after another */
+.split-w { display: inline-block; overflow: hidden; vertical-align: top; padding-bottom: 0.12em; margin-bottom: -0.12em; }
+.split-w > span { display: inline-block; transform: translateY(110%); transition: transform 1000ms var(--ease-soft); }
+.split.is-in .split-w > span { transform: none; }
+
+/* hover: photos in cards lean in slowly, arrows nudge forward */
+.lift-img img { transition: transform 900ms var(--ease-soft); }
+.lift-img:hover img { transform: scale(1.05); }
+.nudge svg { transition: transform 300ms var(--ease-soft); }
+.nudge:hover svg { transform: translateX(4px); }
+
+/* Reduced motion: nothing moves, but things still fade in so the page doesn't feel dead. */
+@media (prefers-reduced-motion: reduce) {
+  .enter, .enter-2, .enter-3, .enter-late { animation: fade 600ms ease both; }
+  .settle { animation: none; }
+  .reveal, .reveal-clip { transform: none; clip-path: none; opacity: 0; transition: opacity 700ms ease; }
+  .reveal.is-in, .reveal-clip.is-in { opacity: 1; }
+  .reveal-clip img, .reveal-clip.is-in img { transform: none; transition: none; }
+  .split-w > span { transform: none; opacity: 0; transition: opacity 700ms ease; }
+  .split.is-in .split-w > span { opacity: 1; }
+  .lift-img:hover img, .nudge:hover svg { transform: none; }
+}
+
+/* PhotoMarquee: the doubled row slides left by one copy (half its width plus half a gap) and starts over, seamlessly.
+   It keeps drifting under reduced motion too, slowly, with a pause button beside it and a pause on hover. */
+@keyframes marquee { to { transform: translateX(calc(-50% - 0.5rem)); } }
+.marquee { animation: marquee 70s linear infinite; }
+.marquee:hover, .marquee.is-paused { animation-play-state: paused; }
+.marquee-mask { mask-image: linear-gradient(to right, transparent, #000 6%, #000 94%, transparent); }
+@media (prefers-reduced-motion: reduce) { .marquee { animation-duration: 90s; } }
+
+/* Langkah Ulon: the line under the current shop number fills, then the next shop comes in; its photo settles from a zoom */
+@keyframes step-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.step-fill { animation: step-fill 4500ms linear both; }
+@keyframes step-photo { from { opacity: 0; transform: scale(1.06); } to { opacity: 1; transform: none; } }
+.step-photo { animation: step-photo 900ms var(--ease-soft) both; }
+@media (prefers-reduced-motion: reduce) { .step-photo { animation: fade 600ms ease both; } }
+
+/* Pilar Ulon on touch screens: one snap point per pillar that a swipe can't skip (the phone's own scrolling) */
+@media (pointer: coarse) and (prefers-reduced-motion: no-preference) {
+  html:has(.snap-step) { scroll-snap-type: y proximity; }
+  .snap-step { scroll-snap-align: start; scroll-snap-stop: always; }
+}
+
+/* a sideways row that bleeds to the screen edge but starts and snaps on the same line as the page content
+   (max-w-7xl = 80rem, side padding 1.25rem / 2.5rem from md) */
+.edge-row {
+  --pad: 1.25rem;
+  --inset: max(var(--pad), calc((100% - 80rem) / 2 + var(--pad)));
+  padding-inline: var(--inset);
+  scroll-padding-inline: var(--inset);
+}
+@media (min-width: 48rem) { .edge-row { --pad: 2.5rem; } }
+
+/* sideways scroll rows without a visible bar */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

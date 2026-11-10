@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<title>Ulon brag</title>
+<style>
+  @font-face { font-family: 'Instrument Serif'; src: url(fonts/serif.woff2) format('woff2'); font-weight: 400; }
+  @font-face { font-family: 'Instrument Sans'; src: url(fonts/sans.woff2) format('woff2'); font-weight: 100 900; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+/* Every frame is a pure function of time t (seconds). 100 BPM: beat 0.6 s, bar 2.4 s; every cut sits on a bar line. */
+const W = 1920, H = 1080, DUR = 24, BEAT = 0.6, BAR = 2.4;
+const C = { bg: '#ffffff', band: '#f5f1eb', card: '#f7f4ef', line: '#e3dbcf', ink: '#2b2520', mocha: '#5c5349', muted: '#72685c', caramel: '#985a2c', light: '#f5f0e8' };
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d', { willReadFrequently: true }); // CPU canvas: pixels read back are always the frame just drawn
+let meta;
+const img = {};
+
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ease = (x) => 1 - Math.pow(1 - clamp(x), 3);
+const easeIO = (x) => { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const prog = (t, a, d) => clamp((t - a) / d);
+const lerp = (a, b, k) => a + (b - a) * k;
+
+function load(name, src) {
+  return new Promise((r) => { const i = new Image(); i.onload = () => { img[name] = i; r(); }; i.src = src; });
+}
+async function ready() {
+  const shots = ['home', 'menu-0', 'menu-1', 'menu-2', 'pillar-0', 'pillar-1', 'pillar-2', 'pillar-3', 'lokasi-a', 'lokasi-b', 'lokasi-c'];
+  meta = await (await fetch("shots/meta.json")).json();
+  await Promise.all([
+    ...shots.map((s) => load(s, `shots/${s}.jpg`)),
+    load('hero', 'hero-scene-2400.webp'),
+    load('logo', 'logo-ink.webp'),
+    load('logoCream', 'logo-cream.webp'),
+    document.fonts.load('400 100px "Instrument Serif"'),
+    document.fonts.load('400 40px "Instrument Sans"'),
+    document.fonts.load('500 40px "Instrument Sans"'),
+  ]);
+  return true;
+}
+
+/* ---------- drawing helpers ---------- */
+function text(str, x, y, { font, color = C.ink, align = 'left', alpha = 1, spacing = 0 }) {
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'alphabetic';
+  ctx.letterSpacing = `${spacing}px`;
+  ctx.fillText(str, x, y);
+  ctx.restore();
+}
+function wrap(str, font, maxW) {
+  ctx.save(); ctx.font = font; ctx.letterSpacing = '0px';
+  const words = str.split(' '); const lines = []; let cur = '';
+  for (const w of words) { const t = cur ? cur + ' ' + w : w; if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t; }
+  lines.push(cur); ctx.restore(); return lines;
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function cover(im, x, y, w, h, zoom = 1, ox = 0.5, oy = 0.5) {
+  const s = Math.max(w / im.width, h / im.height) * zoom;
+  const dw = im.width * s, dh = im.height * s;
+  ctx.drawImage(im, x + (w - dw) * ox, y + (h - dh) * oy, dw, dh);
+}
+function cursor(x, y, press = 0) {
+  ctx.save();
+  ctx.translate(x, y);
+  const s = 1 - press * 0.12; ctx.scale(s, s);
+  ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(0, 30); ctx.lineTo(7.5, 23); ctx.lineTo(12.5, 34); ctx.lineTo(17, 32); ctx.lineTo(12, 21.5); ctx.lineTo(22, 21.5); ctx.closePath();
+  ctx.shadowColor = 'rgba(43,37,32,0.35)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = C.ink; ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.lineWidth = 2.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+  ctx.restore();
+}
+function ripple(x, y, k) {
+  if (k <= 0 || k >= 1) return;
+  ctx.save(); ctx.beginPath(); ctx.arc(x, y, 10 + 34 * ease(k), 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(152,90,44,${0.55 * (1 - k)})`; ctx.lineWidth = 3; ctx.stroke(); ctx.restore();
+}
+
+/* The browser window that holds the real pages. */
+const CARD = { x: 720, y: 205, w: 1080, bar: 46 };
+CARD.h = CARD.w * 9 / 16; // content height
+function browser(t, { url, layers, crop, enter = 1, cursorAt, press = 0, clickK = -1, extra }) {
+  const k = ease(enter);
+  const x = CARD.x, y = CARD.y + (1 - k) * 80, w = CARD.w, H2 = CARD.bar + CARD.h;
+  ctx.save();
+  ctx.globalAlpha = clamp(enter * 1.6);
+  // shadow + frame
+  ctx.save(); ctx.shadowColor = 'rgba(43,37,32,0.18)'; ctx.shadowBlur = 60; ctx.shadowOffsetY = 24;
+  rr(x, y, w, H2, 18); ctx.fillStyle = '#fff'; ctx.fill(); ctx.restore();
+  rr(x, y, w, H2, 18); ctx.strokeStyle = C.line; ctx.lineWidth = 1.5; ctx.stroke();
+  // address bar
+  rr(x + 18, y + 10, 300, 26, 13); ctx.fillStyle = C.band; ctx.fill();
+  text(url, x + 34, y + 28, { font: '500 15px "Instrument Sans"', color: C.mocha });
+  // page
+  ctx.save(); rr(x, y + CARD.bar, w, CARD.h, 0); ctx.beginPath(); ctx.rect(x, y + CARD.bar, w, CARD.h);
+  ctx.save(); rr(x, y, w, H2, 18); ctx.clip(); ctx.beginPath(); ctx.rect(x, y + CARD.bar, w, CARD.h); ctx.clip();
+  const [sx, sy, sw] = crop; const sh = sw * 9 / 16; const sc = w / sw;
+  for (const { im, a } of layers) {
+    if (a <= 0) continue;
+    ctx.globalAlpha = clamp(enter * 1.6) * a;
+    ctx.drawImage(img[im], sx, sy, sw, sh, x, y + CARD.bar, w, CARD.h);
+  }
+  ctx.globalAlpha = clamp(enter * 1.6);
+  ctx.restore(); ctx.restore();
+  ctx.beginPath(); ctx.moveTo(x, y + CARD.bar); ctx.lineTo(x + w, y + CARD.bar); ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.stroke();
+  const map = (px, py) => [x + (px - sx) * sc, y + CARD.bar + (py - sy) * sc];
+  if (extra) extra(map, x, y);
+  if (cursorAt) { const [cx, cy] = map(...cursorAt); ripple(cx, cy, clickK); cursor(cx, cy, press); }
+  ctx.restore();
+}
+
+/* Left column copy: small label, serif headline, a line under it. Rises in after `start`, leaves before `end`. */
+function copy(t, start, end, label, head, sub) {
+  const out = prog(t, end - 0.3, 0.3);
+  const lift = -30 * ease(out), fade = 1 - out;
+  const X = 120, maxW = 560;
+  const a1 = ease(prog(t, start + 0.05, 0.5));
+  text(label, X, 380 + (1 - a1) * 24 + lift, { font: '500 26px "Instrument Sans"', color: C.caramel, alpha: a1 * fade });
+  const lines = wrap(head, '400 88px "Instrument Serif"', maxW);
+  lines.forEach((ln, i) => {
+    const a = ease(prog(t, start + 0.15 + i * 0.1, 0.6));
+    text(ln, X, 470 + i * 88 + (1 - a) * 40 + lift, { font: '400 88px "Instrument Serif"', color: C.ink, alpha: a * fade, spacing: -1.5 });
+  });
+  if (sub) {
+    const subLines = wrap(sub, '400 30px "Instrument Sans"', maxW);
+    const top = 470 + lines.length * 88 + 18;
+    subLines.forEach((ln, i) => {
+      const a = ease(prog(t, start + 0.45 + i * 0.08, 0.6));
+      text(ln, X, top + i * 44 + (1 - a) * 24 + lift, { font: '400 30px "Instrument Sans"', color: C.mocha, alpha: a * fade });
+    });
+  }
+}
+
+/* page change inside the browser: the old page goes white, the new one comes in */
+function pageIn(t, start) { return ease(prog(t, start, 0.35)); }
+
+/* ---------- scenes ---------- */
+function hook(t) {
+  ctx.fillStyle = '#0d0b09'; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.globalAlpha = ease(prog(t, 0, 0.5));
+  cover(img.hero, 0, 0, W, H, lerp(1.16, 1.04, ease(t / 2.4)), 0.5, 0.95);
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, 'rgba(0,0,0,0.72)'); g.addColorStop(0.55, 'rgba(0,0,0,0.25)'); g.addColorStop(1, 'rgba(0,0,0,0.55)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+  ctx.save(); ctx.globalAlpha = ease(prog(t, 0.05, 0.4)); ctx.drawImage(img.logoCream, W / 2 - 60, 120, 120, 120 * img.logoCream.height / img.logoCream.width); ctx.restore();
+  const parts = ['#SUMPAH', 'GAK', 'ENCER'];
+  const font = '400 190px "Instrument Serif"';
+  ctx.save(); ctx.font = font; ctx.letterSpacing = '-3px';
+  const widths = parts.map((p) => ctx.measureText(p).width); ctx.restore();
+  const total = widths.reduce((a, b) => a + b, 0);
+  let x = W / 2 - total / 2;
+  parts.forEach((p, i) => {
+    const k = ease(prog(t, i * BEAT, 0.35));
+    ctx.save(); ctx.globalAlpha = k; ctx.translate(x + widths[i] / 2, 470); ctx.scale(lerp(0.86, 1, k), lerp(0.86, 1, k));
+    text(p, 0, 0, { font, color: i === 1 ? '#e7b98a' : C.light, align: 'center', spacing: -3 });
+    ctx.restore(); x += widths[i];
+  });
+  // leave: everything dips to the warm band
+  const out = prog(t, 2.1, 0.3);
+  if (out > 0) { ctx.fillStyle = `rgba(245,241,235,${easeIO(out)})`; ctx.fillRect(0, 0, W, H); }
+}
+
+function stage(t) { ctx.fillStyle = C.band; ctx.fillRect(0, 0, W, H); }
+
+function reveal(t) { // 2.4 – 7.2
+  stage(t);
+  copy(t, 2.45, 7.2, 'Ini Kopi Ulon', 'Website baru, rasa yang sama', 'Menu, cerita, dan 16 gerai dalam satu tempat');
+  const lt = t - 2.4;
+  const push = ease(lt / 4.8);
+  const crop = [lerp(0, 60, push), lerp(0, 20, push), lerp(1920, 1780, push)];
+  const tgt = meta.homeMenuLink;
+  const mv = easeIO(prog(t, 5.0, 1.4));
+  const cur = t > 4.6 ? [lerp(1500, tgt[0], mv), lerp(820, tgt[1] + 6, mv)] : null;
+  const pressK = prog(t, 6.6, 0.18);
+  const leave = prog(t, 6.95, 0.25);
+  browser(t, {
+    url: 'inikopiulon.com', enter: prog(t, 2.5, 0.8), crop,
+    layers: [{ im: 'home', a: 1 - leave }],
+    cursorAt: cur, press: pressK > 0 && pressK < 1 ? Math.sin(pressK * Math.PI) : 0, clickK: prog(t, 6.6, 0.5),
+  });
+}
+
+function menu(t) { // 7.2 – 12.0
+  stage(t);
+  copy(t, 7.25, 12.0, 'Menu', 'Sembilan kategori menu', 'Arahkan ke menunya, fotonya ikut berganti');
+  const lt = t - 7.2;
+  const crop = [lerp(330, 350, ease(lt / 4.8)), lerp(170, 182, ease(lt / 4.8)), lerp(1260, 1220, ease(lt / 4.8))];
+  const rows = meta.menuRows;
+  const a1 = ease(prog(t, 9.0, 0.3)), a2 = ease(prog(t, 10.2, 0.3));
+  const pos = (i) => [rows[i][0] - 260, rows[i][1] + 4];
+  let cur;
+  if (t < 8.2) { const m = easeIO(prog(t, 7.5, 0.7)); cur = [lerp(1500, pos(0)[0], m), lerp(900, pos(0)[1], m)]; }
+  else if (t < 10.2) { const m = easeIO(prog(t, 8.7, 0.3)); cur = [lerp(pos(0)[0], pos(1)[0], m), lerp(pos(0)[1], pos(1)[1], m)]; }
+  else { const m = easeIO(prog(t, 9.9, 0.3)); cur = [lerp(pos(1)[0], pos(2)[0], m), lerp(pos(1)[1], pos(2)[1], m)]; }
+  const leave = prog(t, 11.75, 0.25);
+  const inK = pageIn(t, 7.2);
+  browser(t, {
+    url: 'inikopiulon.com/menu', crop,
+    layers: [{ im: 'menu-0', a: inK * (1 - leave) }, { im: 'menu-1', a: a1 * (1 - a2) * inK * (1 - leave) }, { im: 'menu-2', a: a2 * inK * (1 - leave) }],
+    cursorAt: t > 7.45 && t < 11.85 ? cur : null,
+  });
+}
+
+function pillars(t) { // 12.0 – 16.8
+  stage(t);
+  copy(t, 12.05, 16.8, 'Tentang', 'Satu scroll, satu pilar', 'Empat hal yang kami jaga di setiap gerai');
+  const lt = t - 12.0;
+  const crop = [lerp(330, 350, ease(lt / 4.8)), lerp(60, 74, ease(lt / 4.8)), lerp(1260, 1220, ease(lt / 4.8))];
+  const switches = [13.2, 14.4, 15.6];
+  const inK = pageIn(t, 12.0), leave = prog(t, 16.55, 0.25);
+  const layers = [0, 1, 2, 3].map((i) => {
+    const on = i === 0 ? 1 : ease(prog(t, switches[i - 1], 0.3));
+    const off = i === 3 ? 0 : ease(prog(t, switches[i], 0.3));
+    return { im: `pillar-${i}`, a: on * (1 - off) * inK * (1 - leave) };
+  });
+  browser(t, {
+    url: 'inikopiulon.com/tentang', crop, layers,
+    extra: (map, x, y) => {
+      // a mouse with its wheel ticking down at each change
+      const mx = x + CARD.w - 70, my = y + CARD.bar + CARD.h - 92;
+      const a = ease(prog(t, 12.4, 0.4)) * (1 - leave);
+      if (a <= 0) return;
+      ctx.save(); ctx.globalAlpha = a;
+      rr(mx - 6, my - 6, 46, 70, 23); ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fill();
+      rr(mx + 3, my + 3, 28, 46, 14); ctx.strokeStyle = C.ink; ctx.lineWidth = 2.5; ctx.stroke();
+      let dy = 0;
+      for (const s of switches) { const k = prog(t, s - 0.25, 0.3); if (k > 0 && k < 1) dy = Math.sin(k * Math.PI) * 10; }
+      rr(mx + 15, my + 11 + dy, 4, 9, 2); ctx.fillStyle = C.caramel; ctx.fill();
+      ctx.restore();
+    },
+  });
+}
+
+function lokasi(t) { // 16.8 – 21.6
+  stage(t);
+  copy(t, 16.85, 21.6, 'Lokasi', '16 gerai di 6 kota', 'Pilih kotamu, gerainya langsung muncul');
+  const lt = t - 16.8;
+  const crop = [lerp(320, 345, ease(lt / 4.8)), lerp(360, 372, ease(lt / 4.8)), lerp(1280, 1236, ease(lt / 4.8))];
+  const sel = meta.citySelect, jak = meta.jakarta;
+  let cur;
+  if (t < 18.0) { const m = easeIO(prog(t, 17.1, 0.8)); cur = [lerp(1500, sel[0], m), lerp(1100, sel[1] + 4, m)]; }
+  else { const m = easeIO(prog(t, 18.45, 0.6)); cur = [lerp(sel[0], jak[0] - 30, m), lerp(sel[1] + 4, jak[1] + 4, m)]; }
+  const b = ease(prog(t, 18.0, 0.2)), c = ease(prog(t, 19.2, 0.35));
+  const inK = pageIn(t, 16.8), leave = prog(t, 21.35, 0.25);
+  const click1 = prog(t, 18.0, 0.5), click2 = prog(t, 19.2, 0.5);
+  const press = (k) => (k > 0 && k < 0.36 ? Math.sin((k / 0.36) * Math.PI) : 0);
+  browser(t, {
+    url: 'inikopiulon.com/lokasi', crop,
+    layers: [{ im: 'lokasi-a', a: inK * (1 - leave) }, { im: 'lokasi-b', a: b * (1 - c) * inK * (1 - leave) }, { im: 'lokasi-c', a: c * inK * (1 - leave) }],
+    cursorAt: t > 17.0 && t < 21.4 ? cur : null,
+    press: Math.max(press(click1), press(click2)), clickK: t < 19.2 ? click1 : click2,
+  });
+}
+
+function outro(t) { // 21.6 – 24.0
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  const a1 = ease(prog(t, 21.65, 0.5)), a2 = ease(prog(t, 21.85, 0.6)), a3 = ease(prog(t, 22.1, 0.6));
+  const lw = 300, lh = lw * img.logo.height / img.logo.width;
+  ctx.save(); ctx.globalAlpha = a1; ctx.drawImage(img.logo, W / 2 - lw / 2, 250 + (1 - a1) * 30, lw, lh); ctx.restore();
+  text('#SUMPAHGAKENCER', W / 2, 250 + lh + 190 + (1 - a2) * 40, { font: '400 128px "Instrument Serif"', color: C.ink, align: 'center', alpha: a2, spacing: -2 });
+  text('inikopiulon.com', W / 2, 250 + lh + 290 + (1 - a3) * 24, { font: '500 40px "Instrument Sans"', color: C.caramel, align: 'center', alpha: a3 });
+  text('16 gerai di 6 kota', W / 2, 250 + lh + 350 + (1 - a3) * 24, { font: '400 30px "Instrument Sans"', color: C.mocha, align: 'center', alpha: a3 });
+}
+
+const POSTER_T = 11.2;
+function drawAt(t) {
+  if (t < 2.4) hook(t);
+  else if (t < 7.2) reveal(t);
+  else if (t < 12.0) menu(t);
+  else if (t < 16.8) pillars(t);
+  else if (t < 21.6) lokasi(t);
+  else outro(t);
+}
+function drawFrame(t, { poster = true } = {}) {
+  if (poster && t < 1 / 30) return drawAt(POSTER_T); // frame 0 is the poster, for thumbnails
+  drawAt(t);
+}
+
+/* ---------- music: one piece, effects in key, all on the beat grid from frame 0 ---------- */
+async function makeAudio() {
+  const SR = 48000;
+  const ac = new OfflineAudioContext(2, SR * DUR, SR);
+  const master = ac.createGain(); master.gain.value = 0.9;
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 3; comp.attack.value = 0.01; comp.release.value = 0.25;
+  master.connect(comp); comp.connect(ac.destination);
+  // room: short noise-tail reverb for pads, keys and effects
+  const ir = ac.createBuffer(2, SR * 1.8, SR);
+  for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3); }
+  const verb = ac.createConvolver(); verb.buffer = ir; const verbOut = ac.createGain(); verbOut.gain.value = 0.22; verb.connect(verbOut); verbOut.connect(master);
+  const delay = ac.createDelay(); delay.delayTime.value = BEAT / 2; const fb = ac.createGain(); fb.gain.value = 0.25; const dOut = ac.createGain(); dOut.gain.value = 0.18;
+  delay.connect(fb); fb.connect(delay); delay.connect(dOut); dOut.connect(master);
+  const noise = ac.createBuffer(1, SR * 2, SR); { const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }
+
+  const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+  // F maj7, A m7, D m7, Bb maj7 (MIDI)
+  const chords = [[53, 57, 60, 64], [57, 60, 64, 67], [50, 53, 57, 60], [46, 50, 53, 57]];
+  const roots = [41, 45, 38, 46 - 12];
+
+  function kick(t, v = 0.55) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.14);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + 0.005); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.38);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.4);
+  }
+  function noiseHit(t, { freq, q = 1, type = 'bandpass', dur, v, send = 0 }) {
+    const s = ac.createBufferSource(); s.buffer = noise; const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+    const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(master); if (send) { const sg = ac.createGain(); sg.gain.value = send; g.connect(sg); sg.connect(verb); }
+    s.start(t, Math.random()); s.stop(t + dur + 0.02);
+  }
+  function bass(t, m, dur, v = 0.24) {
+    const o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+    o.type = 'triangle'; o.frequency.value = hz(m); f.type = 'lowpass'; f.frequency.value = 420;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + 0.02); g.gain.setValueAtTime(v, t + dur - 0.08); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(f); f.connect(g); g.connect(master); o.start(t); o.stop(t + dur + 0.05);
+  }
+  function pad(t, notes, dur, v = 0.035) {
+    for (const m of notes) for (const det of [-6, 6]) {
+      const o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+      o.type = 'sawtooth'; o.frequency.value = hz(m + 12); o.detune.value = det; f.type = 'lowpass'; f.frequency.value = 1100; f.Q.value = 0.3;
+      g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(v, t + 0.5); g.gain.setValueAtTime(v, t + dur - 0.4); g.gain.linearRampToValueAtTime(0.0001, t + dur + 0.3);
+      o.connect(f); f.connect(g); g.connect(master); const s = ac.createGain(); s.gain.value = 0.6; g.connect(s); s.connect(verb);
+      o.start(t); o.stop(t + dur + 0.4);
+    }
+  }
+  function pluck(t, m, v = 0.07, dec = 0.55, wet = 0.5) {
+    for (const [mult, lv] of [[1, 1], [2, 0.35], [3, 0.12]]) {
+      const o = ac.createOscillator(), g = ac.createGain(); o.type = 'sine'; o.frequency.value = hz(m) * mult;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v * lv, t + 0.006); g.gain.exponentialRampToValueAtTime(0.0001, t + dec / mult);
+      o.connect(g); g.connect(master); const s = ac.createGain(); s.gain.value = wet; g.connect(s); s.connect(delay); s.connect(verb);
+      o.start(t); o.stop(t + dec + 0.05);
+    }
+  }
+  function swoosh(end, v = 0.05) { // a soft filtered rise that lands on the cut
+    const s = ac.createBufferSource(); s.buffer = noise; const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 1.4;
+    f.frequency.setValueAtTime(350, end - 0.6); f.frequency.exponentialRampToValueAtTime(3200, end);
+    const g = ac.createGain(); g.gain.setValueAtTime(0.0001, end - 0.6); g.gain.exponentialRampToValueAtTime(v, end - 0.02); g.gain.exponentialRampToValueAtTime(0.0001, end + 0.12);
+    s.connect(f); f.connect(g); g.connect(master); const sg = ac.createGain(); sg.gain.value = 0.5; g.connect(sg); sg.connect(verb);
+    s.start(end - 0.6, 0.3); s.stop(end + 0.2);
+  }
+  function tick(t, m) { pluck(t, m, 0.035, 0.25, 0.4); }
+
+  const bars = 10;
+  for (let b = 0; b < bars; b++) {
+    const t0 = b * BAR; const ci = b % 4; const ch = chords[ci];
+    const last = b === bars - 1;
+    pad(t0, ch, last ? BAR - 0.35 : BAR, b === 0 ? 0.03 : 0.032);
+    if (b === 0) {
+      // hook: the three words land on beats 1-3, a kick under each
+      [0, 1, 2].forEach((i) => { kick(i * BEAT, 0.35); pluck(i * BEAT, [72, 77, 81][i], 0.09, 0.8, 0.6); });
+      continue;
+    }
+    for (let q = 0; q < 4; q++) {
+      const t = t0 + q * BEAT;
+      if (!last || q === 0) { if (q === 0 || q === 2) kick(t, q === 0 ? 0.55 : 0.42); }
+      if (!last && (q === 1 || q === 3)) noiseHit(t, { freq: 1800, q: 0.9, dur: 0.12, v: 0.09, send: 0.25 });
+      if (!last) for (const e of [0, 0.5]) noiseHit(t + e * BEAT, { freq: 7500, type: 'highpass', dur: 0.035, v: e ? 0.035 : 0.02 });
+    }
+    if (!last) { bass(t0, roots[ci], BEAT * 1.8); bass(t0 + BEAT * 2, roots[ci] + 7, BEAT * 1.5, 0.2); bass(t0 + BEAT * 3.5, roots[ci] + 12, BEAT * 0.45, 0.14); }
+    else bass(t0, roots[ci], BAR - 0.3, 0.2);
+    // keys: an eighth-note arpeggio over the chord, an octave up; the outro thins to quarter notes
+    const arp = [ch[0] + 12, ch[2] + 12, ch[1] + 12, ch[3] + 12, ch[2] + 12, ch[0] + 24, ch[3] + 12, ch[1] + 12];
+    arp.forEach((m, i) => { if (last && i % 2) return; if (last && i > 4) return; pluck(t0 + i * BEAT / 2, m, i % 2 ? 0.045 : 0.06); });
+  }
+  // cuts: a soft rise into each, and one chord tone ringing on it
+  [[2.4, 81], [7.2, 76], [12.0, 81], [16.8, 74], [21.6, 77]].forEach(([c, m]) => { swoosh(c); pluck(c, m + 12, 0.04, 0.9, 0.7); });
+  // UI moments: clicks and changes, quiet, in key
+  [6.6, 18.0, 19.2].forEach((c) => noiseHit(c, { freq: 2600, q: 3, dur: 0.05, v: 0.06 }));
+  [9.0, 10.2, 13.2, 14.4, 15.6].forEach((c, i) => tick(c, [84, 88, 81, 84, 88][i]));
+  // the last chord: F maj9 rings out
+  pad(21.6, [53, 57, 60, 64, 67], 2.0, 0.03);
+  pluck(21.6, 65 + 12, 0.07, 1.6, 0.8);
+  // fade the very end so the file closes cleanly
+  master.gain.setValueAtTime(0.9, DUR - 0.6); master.gain.linearRampToValueAtTime(0.0001, DUR - 0.02);
+  return ac.startRendering();
+}
+
+/* ---------- outputs ---------- */
+async function post(name, blob) { await fetch(`/save?name=${encodeURIComponent(name)}`, { method: 'POST', body: blob }); }
+window.stills = async (times, dir = 'work/stills') => {
+  for (const t of times) { drawFrame(t, { poster: false }); const b = await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.9)); await post(`${dir}/t${t.toFixed(2)}.jpg`, b); }
+  return true;
+};
+window.poster = async () => { drawAt(POSTER_T); const b = await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.92)); await post('brag.jpg', b); return true; };
+window.record = async () => {
+  const buf = await makeAudio();
+  const ac = new AudioContext({ sampleRate: 48000 });
+  await ac.resume();
+  const dest = ac.createMediaStreamDestination();
+  const src = ac.createBufferSource(); src.buffer = buf; src.connect(dest);
+  const stream = new MediaStream([...cv.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+  const types = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4'];
+  const mimeType = types.find((m) => MediaRecorder.isTypeSupported(m));
+  if (!mimeType) throw new Error('mp4 recording not supported');
+  const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 14_000_000, audioBitsPerSecond: 192_000 });
+  const chunks = []; rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  drawFrame(0);
+  const start = ac.currentTime + 0.15;
+  src.start(start);
+  rec.start();
+  await new Promise((done) => {
+    const loop = () => {
+      const t = ac.currentTime - start;
+      if (t >= DUR + 0.05) return done();
+      drawFrame(Math.max(0, t));
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+  rec.stop();
+  await new Promise((r) => (rec.onstop = r));
+  await post('brag.mp4', new Blob(chunks, { type: mimeType }));
+  return mimeType;
+};
+window.audioWav = async () => { // the soundtrack alone, for checking
+  const b = await makeAudio(); const ch = [b.getChannelData(0), b.getChannelData(1)]; const n = b.length;
+  const dv = new DataView(new ArrayBuffer(44 + n * 4)); const w = (o, s) => [...s].forEach((c, i) => dv.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); dv.setUint32(4, 36 + n * 4, true); w(8, 'WAVEfmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 2, true);
+  dv.setUint32(24, 48000, true); dv.setUint32(28, 48000 * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true); w(36, 'data'); dv.setUint32(40, n * 4, true);
+  let peak = 0; for (let i = 0; i < n; i++) for (let c = 0; c < 2; c++) { const v = Math.max(-1, Math.min(1, ch[c][i])); peak = Math.max(peak, Math.abs(v)); dv.setInt16(44 + i * 4 + c * 2, v * 32767, true); }
+  await post('work/soundtrack.wav', new Blob([dv.buffer], { type: 'audio/wav' }));
+  return peak;
+};
+/* ---------- deterministic encode: every frame rendered at its exact time, H.264 + AAC via WebCodecs, muxed to MP4 ---------- */
+const FPS = 30;
+function cat(parts) {
+  let n = 0; for (const p of parts) n += p.length;
+  const out = new Uint8Array(n); let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+const U8 = (a) => (a instanceof Uint8Array ? a : new Uint8Array(a));
+const u32 = (n) => U8([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
+const u16 = (n) => U8([(n >>> 8) & 255, n & 255]);
+const u8 = (n) => U8([n & 255]);
+const str = (s) => U8([...s].map((c) => c.charCodeAt(0)));
+const zeros = (n) => new Uint8Array(n);
+function box(type, ...parts) { const body = cat(parts.map(U8)); return cat([u32(8 + body.length), str(type), body]); }
+function full(type, v, flags, ...parts) { return box(type, u8(v), u8(flags >> 16), u8(flags >> 8), u8(flags), ...parts); }
+const matrix = cat([0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000].map(u32));
+
+function sampleTables(sizes, offsets, delta, keys) {
+  const parts = [
+    full('stts', 0, 0, u32(1), u32(sizes.length), u32(delta)),
+    full('stsc', 0, 0, u32(1), u32(1), u32(1), u32(1)),
+    full('stsz', 0, 0, u32(0), u32(sizes.length), ...sizes.map(u32)),
+    full('stco', 0, 0, u32(offsets.length), ...offsets.map(u32)),
+  ];
+  if (keys) parts.splice(1, 0, full('stss', 0, 0, u32(keys.length), ...keys.map(u32)));
+  return parts;
+}
+function desc(tag, body) { return cat([u8(tag), u8(body.length), body]); }
+
+function mux({ video, audio }) {
+  // layout: ftyp | mdat (all video samples, then all audio samples) | moov
+  const ftyp = box('ftyp', str('isom'), u32(0x200), str('isom'), str('iso2'), str('avc1'), str('mp41'));
+  const vData = video.chunks.map((c) => c.data), aData = audio.chunks.map((c) => c.data);
+  let off = ftyp.length + 8;
+  const vOff = vData.map((d) => { const o = off; off += d.length; return o; });
+  const aOff = aData.map((d) => { const o = off; off += d.length; return o; });
+  const mdat = cat([u32(8 + vData.reduce((a, d) => a + d.length, 0) + aData.reduce((a, d) => a + d.length, 0)), str('mdat'), ...vData, ...aData]);
+
+  const vTs = FPS * 1000, vDelta = 1000, vCount = vData.length;
+  const aTs = 48000, aDelta = 1024, aCount = aData.length;
+  const durMs = Math.round((vCount / FPS) * 1000);
+  const keys = video.chunks.map((c, i) => (c.key ? i + 1 : 0)).filter(Boolean);
+  const hdlr = (t, name) => full('hdlr', 0, 0, u32(0), str(t), zeros(12), str(name), u8(0));
+  const dinf = box('dinf', full('dref', 0, 0, u32(1), full('url ', 0, 1)));
+
+  const avc1 = box('avc1', zeros(6), u16(1), u16(0), u16(0), zeros(12), u16(W), u16(H), u32(0x00480000), u32(0x00480000), u32(0), u16(1), zeros(32), u16(0x18), u16(0xffff),
+    box('avcC', video.description));
+  const vTrak = box('trak',
+    full('tkhd', 0, 3, u32(0), u32(0), u32(1), u32(0), u32(durMs), zeros(8), u16(0), u16(0), u16(0), u16(0), matrix, u32(W << 16), u32(H << 16)),
+    box('mdia',
+      full('mdhd', 0, 0, u32(0), u32(0), u32(vTs), u32(vCount * vDelta), u16(0x55c4), u16(0)),
+      hdlr('vide', 'VideoHandler'),
+      box('minf', full('vmhd', 0, 1, u16(0), u16(0), u16(0), u16(0)), dinf,
+        box('stbl', full('stsd', 0, 0, u32(1), avc1), ...sampleTables(vData.map((d) => d.length), vOff, vDelta, keys)))));
+
+  const asc = audio.description;
+  const esds = full('esds', 0, 0,
+    desc(0x03, cat([u16(2), u8(0),
+      desc(0x04, cat([u8(0x40), u8(0x15), zeros(3), u32(192000), u32(192000), desc(0x05, asc)])),
+      desc(0x06, u8(0x02))])));
+  const mp4a = box('mp4a', zeros(6), u16(1), zeros(8), u16(2), u16(16), u16(0), u16(0), u32(48000 << 16), esds);
+  const aTrak = box('trak',
+    full('tkhd', 0, 3, u32(0), u32(0), u32(2), u32(0), u32(durMs), zeros(8), u16(0), u16(1), u16(0x0100), u16(0), matrix, u32(0), u32(0)),
+    box('mdia',
+      full('mdhd', 0, 0, u32(0), u32(0), u32(aTs), u32(aCount * aDelta), u16(0x55c4), u16(0)),
+      hdlr('soun', 'SoundHandler'),
+      box('minf', full('smhd', 0, 0, u16(0), u16(0)), dinf,
+        box('stbl', full('stsd', 0, 0, u32(1), mp4a), ...sampleTables(aData.map((d) => d.length), aOff, aDelta, null)))));
+
+  const mvhd = full('mvhd', 0, 0, u32(0), u32(0), u32(1000), u32(durMs), u32(0x00010000), u16(0x0100), zeros(10), matrix, zeros(24), u32(3));
+  const moov = box('moov', mvhd, vTrak, aTrak);
+  return cat([ftyp, mdat, moov]);
+}
+
+/* RGBA to I420, BT.709 limited range (16-235), the way players expect HD video; done here so the colours are exact. */
+function toI420(px) {
+  const yp = new Uint8Array(W * H + (W * H) / 2), uo = W * H, vo = uo + (W * H) / 4, cw = W / 2;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) yp[i] = 16 + ((219 * (0.2126 * px[p] + 0.7152 * px[p + 1] + 0.0722 * px[p + 2])) / 255 + 0.5) | 0;
+  for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) {
+    const p0 = (y * W + x) * 4, p1 = p0 + 4, p2 = p0 + W * 4, p3 = p2 + 4;
+    const r = (px[p0] + px[p1] + px[p2] + px[p3]) / 1020, g = (px[p0 + 1] + px[p1 + 1] + px[p2 + 1] + px[p3 + 1]) / 1020, b = (px[p0 + 2] + px[p1 + 2] + px[p2 + 2] + px[p3 + 2]) / 1020;
+    const yy = 0.2126 * r + 0.7152 * g + 0.0722 * b, ci = (y / 2) * cw + x / 2;
+    yp[uo + ci] = Math.max(16, Math.min(240, Math.round(128 + 224 * ((b - yy) / 1.8556))));
+    yp[vo + ci] = Math.max(16, Math.min(240, Math.round(128 + 224 * ((r - yy) / 1.5748))));
+  }
+  return yp;
+}
+window.encode = async () => {
+  const frames = Math.round(DUR * FPS);
+  // video
+  const vChunks = []; let vDesc = null; let order = [];
+  const venc = new VideoEncoder({
+    output: (chunk, md) => {
+      if (md?.decoderConfig?.description && !vDesc) vDesc = new Uint8Array(md.decoderConfig.description);
+      const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data);
+      vChunks.push({ data, key: chunk.type === 'key' }); order.push(chunk.timestamp);
+    },
+    error: (e) => { throw e; },
+  });
+  const vcfg = { codec: 'avc1.640028', width: W, height: H, bitrate: 14_000_000, framerate: FPS, avc: { format: 'avc' }, latencyMode: 'quality' };
+  if (!(await VideoEncoder.isConfigSupported(vcfg)).supported) throw new Error('H.264 encode not supported');
+  venc.configure(vcfg);
+  for (let n = 0; n < frames; n++) {
+    drawFrame(n / FPS);
+    const vf = new VideoFrame(toI420(ctx.getImageData(0, 0, W, H).data), { format: 'I420', codedWidth: W, codedHeight: H, timestamp: Math.round((n * 1e6) / FPS), duration: Math.round(1e6 / FPS), colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } });
+    venc.encode(vf, { keyFrame: n % 60 === 0 });
+    vf.close();
+    while (venc.encodeQueueSize > 6) await new Promise((r) => setTimeout(r, 2));
+  }
+  await venc.flush(); venc.close();
+  const monotonic = order.every((t, i) => i === 0 || t > order[i - 1]);
+
+  // audio
+  const buf = await makeAudio();
+  const aChunks = []; let aDesc = null;
+  const aenc = new AudioEncoder({
+    output: (chunk, md) => {
+      if (md?.decoderConfig?.description && !aDesc) aDesc = new Uint8Array(md.decoderConfig.description);
+      const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data); aChunks.push({ data });
+    },
+    error: (e) => { throw e; },
+  });
+  const acfg = { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 192000 };
+  if (!(await AudioEncoder.isConfigSupported(acfg)).supported) throw new Error('AAC encode not supported');
+  aenc.configure(acfg);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  for (let i = 0; i < buf.length; i += 1024) {
+    const n = Math.min(1024, buf.length - i);
+    const planar = new Float32Array(n * 2); planar.set(L.subarray(i, i + n), 0); planar.set(R.subarray(i, i + n), n);
+    const ad = new AudioData({ format: 'f32-planar', sampleRate: 48000, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round((i * 1e6) / 48000), data: planar });
+    aenc.encode(ad); ad.close();
+  }
+  await aenc.flush(); aenc.close();
+  if (!aDesc) aDesc = U8([0x11, 0x90]); // AAC-LC, 48 kHz, stereo
+
+  const file = mux({ video: { chunks: vChunks, description: vDesc }, audio: { chunks: aChunks, description: aDesc } });
+  await post('brag.mp4', new Blob([file], { type: 'video/mp4' }));
+  return { frames: vChunks.length, keys: vChunks.filter((c) => c.key).length, monotonic, audioChunks: aChunks.length, bytes: file.length, avcC: vDesc?.length, asc: [...aDesc].map((x) => x.toString(16)).join(' ') };
+};
+
+window.READY = ready();
+</script>
+</body>
+</html>
